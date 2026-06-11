@@ -1,8 +1,12 @@
-use crate::core::EventEnvelope;
+use crate::{
+    core::EventEnvelope,
+    observability::{metrics, trace_envelope},
+};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
 use sqlx::{Pool, Row, Sqlite};
+use tracing::Instrument;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionError {
@@ -88,8 +92,26 @@ impl OrderProjection {
         envelope: EventEnvelope,
         offset: i64,
     ) -> Result<(), ProjectionError> {
-        apply_order_event(&self.inner.pool, envelope).await?;
-        self.inner.checkpoint(offset).await
+        let span = trace_envelope(&envelope);
+        let result = async {
+            apply_order_event(&self.inner.pool, envelope).await?;
+            self.inner.checkpoint(offset).await
+        }
+        .instrument(span)
+        .await;
+
+        match result {
+            Ok(()) => {
+                let (_, events_processed, _) = metrics();
+                events_processed.increment();
+                Ok(())
+            }
+            Err(err) => {
+                let (_, _, events_failed) = metrics();
+                events_failed.increment();
+                Err(err)
+            }
+        }
     }
 }
 

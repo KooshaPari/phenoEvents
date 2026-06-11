@@ -7,7 +7,6 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration as StdDuration};
 use tokio::{task::JoinHandle, time};
 use tracing::Instrument;
 use uuid::Uuid;
-
 pub type HandlerResult = Result<(), HandlerError>;
 pub type HandlerFuture = Pin<Box<dyn Future<Output = HandlerResult> + Send>>;
 pub type Handler = Arc<dyn Fn(EventEnvelope, Option<Uuid>) -> HandlerFuture + Send + Sync>;
@@ -250,7 +249,6 @@ impl SqliteBus {
                     events_failed.increment();
                 }
             }
-
             Ok::<(), sqlx::Error>(())
         }
         .instrument(span)
@@ -448,7 +446,6 @@ mod tests {
         eventually(|| async { bus.status(envelope.id).await.unwrap() == Some("dlq".into()) }).await;
         assert_eq!(bus.attempts(envelope.id).await.expect("attempts"), 2);
     }
-
     #[tokio::test]
     async fn handler_receives_last_seen_for_idempotency_context() {
         let bus = bus().await;
