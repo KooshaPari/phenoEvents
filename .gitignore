@@ -1,0 +1,19 @@
+# Phenotype-org standard .gitignore — Rust
+# Source: https://github.com/KooshaPari/phenotype-tooling/blob/main/templates/gitignore-rust
+
+# Build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
