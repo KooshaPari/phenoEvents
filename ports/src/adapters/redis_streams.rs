@@ -3,7 +3,7 @@
 
 //! RedisStreamsBus adapter (uses redis-rs with streams).
 
-use super::event_bus::{BusError, EventBus, Payload, Topic};
+use crate::event_bus::{BusError, EventBus, Payload, Topic};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_stream::Stream;

@@ -1,0 +1,15 @@
+[package]
+name = "ports"
+version = "0.1.0"
+edition = "2021"
+description = "Hexagonal port traits and adapter implementations for the event bus subsystem (T69: PhenoEvents R4 wave)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+thiserror = "2"
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
