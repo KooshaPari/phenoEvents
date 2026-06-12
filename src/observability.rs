@@ -5,6 +5,25 @@ use std::sync::{
 };
 use tracing::{span, Level, Span};
 
+static TRACING_INIT: OnceLock<()> = OnceLock::new();
+
+/// Initialize global tracing subscriber with `RUST_LOG`-style `EnvFilter`.
+///
+/// Safe to call multiple times — only the first call has any effect. The
+/// default filter is `info,pheno_events=debug,sqlx=warn` so the bus and
+/// projections are visible by default while noisy sqlx spans are muted.
+pub fn init_tracing() {
+    TRACING_INIT.get_or_init(|| {
+        use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,pheno_events=debug,sqlx=warn"));
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().with_target(false))
+            .try_init();
+    });
+}
+
 static EVENTS_PUBLISHED: OnceLock<Arc<AtomicU64>> = OnceLock::new();
 static EVENTS_PROCESSED: OnceLock<Arc<AtomicU64>> = OnceLock::new();
 static EVENTS_FAILED: OnceLock<Arc<AtomicU64>> = OnceLock::new();
@@ -61,7 +80,7 @@ pub fn metrics() -> (Counter, Counter, Counter) {
 
 #[cfg(test)]
 mod tests {
-    use super::{metrics, trace_envelope};
+    use super::{init_tracing, metrics, trace_envelope};
     use crate::core::EventEnvelope;
     use serde_json::json;
 
@@ -90,5 +109,22 @@ mod tests {
         assert_eq!(published.get(), 1);
         assert_eq!(processed.get(), 2);
         assert_eq!(failed.get(), 1);
+    }
+
+    #[test]
+    fn init_tracing_is_idempotent() {
+        // Multiple calls must not panic from "global subscriber already set".
+        init_tracing();
+        init_tracing();
+        init_tracing();
+    }
+
+    #[test]
+    fn init_tracing_accepts_custom_env_filter() {
+        // Calling with a different RUST_LOG value still must not panic on a
+        // second invocation; verifies the OnceLock path tolerates redialing.
+        std::env::set_var("RUST_LOG", "warn");
+        init_tracing();
+        std::env::remove_var("RUST_LOG");
     }
 }
