@@ -94,7 +94,7 @@ fn enforce_additive_policy(previous: &Value, next: &Value) -> Result<(), Validat
 
     let previous_required = required_fields(previous);
     let next_required = required_fields(next);
-    for required in next_required.difference(&previous_required) {
+    if let Some(required) = next_required.difference(&previous_required).next() {
         return Err(ValidationError::BreakingChange(format!(
             "new required property '{required}' is not additive"
         )));
