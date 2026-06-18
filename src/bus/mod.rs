@@ -11,6 +11,9 @@ pub type HandlerResult = Result<(), HandlerError>;
 pub type HandlerFuture = Pin<Box<dyn Future<Output = HandlerResult> + Send>>;
 pub type Handler = Arc<dyn Fn(EventEnvelope, Option<Uuid>) -> HandlerFuture + Send + Sync>;
 
+pub mod in_memory;
+pub use in_memory::InMemoryBus;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ack {
     pub event_id: Uuid,
