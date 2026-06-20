@@ -27,9 +27,9 @@ device: macbook
 
 | Date | Source | File | Tag |
 | ---- | ------ | ---- | --- |
-| ? | claude-code | `docs/curated-prompts/claude-code/unknown/9260b88f135d0dd5.md` | policy-setting |
-| ? | claude-code | `docs/curated-prompts/claude-code/unknown/b4fc41870e8c45c5.md` | narrative |
 | ? | claude-code | `docs/curated-prompts/claude-code/unknown/d52c2da3542e6104.md` | narrative |
+| ? | claude-code | `docs/curated-prompts/claude-code/unknown/b4fc41870e8c45c5.md` | narrative |
+| ? | claude-code | `docs/curated-prompts/claude-code/unknown/9260b88f135d0dd5.md` | policy-setting |
 
 ## Bound Plans
 
