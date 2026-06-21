@@ -158,6 +158,7 @@ async fn run_subscriber(
         match handler(envelope, last_seen).await {
             Ok(()) => {}
             Err(HandlerError(message)) => {
+                pheno_otel::metrics::record_error("pheno_events.bus.handler", "handler_nack");
                 tracing::warn!(%event_id, %subscriber_id, error = %message, "handler nacked; dropping event (in-memory bus has no retry)");
             }
         }
