@@ -2,17 +2,37 @@ name: cargo-deny
 on:
   workflow_dispatch:
   pull_request:
-    paths: ['Cargo.toml','Cargo.lock','deny.toml']
+    paths: ['Cargo.toml', 'Cargo.lock', 'deny.toml']
   push:
     branches: [main]
-    paths: ['Cargo.toml','Cargo.lock','deny.toml']
+    paths: ['Cargo.toml', 'Cargo.lock', 'deny.toml']
+
 permissions:
   contents: read
-
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   cargo-deny:
-    uses: KooshaPari/phenotype-tooling/.github/workflows/reusable/cargo-deny.yml@main
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: stable
+
+      # `deny.toml` lives in this repo (local override > org baseline), so the
+      # reusable cross-repo workflow is unnecessary here. We run cargo-deny
+      # inlined with the same pinned action SHAs that the org reusable used.
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v6
+        with:
+          rust-version: stable
+          command: check advisories
+          manifest-path: ./Cargo.toml
