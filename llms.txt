@@ -1,0 +1,15 @@
+# phenoEvents
+
+## Stack
+- Rust
+- Cargo workspace
+
+## Key commands
+- \`cargo test --workspace\`
+- \`cargo clippy --all -- -D warnings\`
+- \`just test\`
+
+## Docs
+- AGENTS.md — perf, a11y, i18n, SSOT
+- SPEC.md — architecture specification
+- justfile — recipe-based automation
