@@ -1,0 +1,42 @@
+# Dependabot configuration — automated daily/weekly dependency updates
+#
+# This file is required for L28 (dependency hygiene) compliance. It ensures
+# Cargo dependencies, GitHub Actions, and the Rust toolchain are scanned for
+# CVE/updates on a regular cadence and receive PRs automatically.
+#
+# Ref: https://docs.github.com/code-security/dependabot
+
+version: 2
+updates:
+  # --- Crate dependencies (Cargo) ---
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - cargo
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+
+  # --- GitHub Actions ---
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: chore
+      include: scope

@@ -247,7 +247,8 @@ impl SqliteBus {
                     events_processed.increment();
                 }
                 Err(err) => {
-                    self.mark_failed(envelope.id, err.to_string()).await?;
+                    let sanitized = SqliteBus::sanitize_error(&err.to_string());
+                    self.mark_failed(envelope.id, sanitized).await?;
                     let (_, _, events_failed) = metrics();
                     events_failed.increment();
                 }
@@ -258,6 +259,25 @@ impl SqliteBus {
         .await?;
 
         Ok(true)
+    }
+
+    /// Sanitize an error message before persisting it to the database.
+    ///
+    /// Strips control characters (preserving `\n` and `\t`), truncates to
+    /// [`SANITIZE_MAX_LEN`] characters, and appends a truncation marker.
+    /// This avoids leaking internal paths, tokens, PII, or SQL fragments
+    /// through the `last_error` column of the outbox table.
+    const SANITIZE_MAX_LEN: usize = 120;
+    fn sanitize_error(msg: &str) -> String {
+        let mut sanitized: String = msg
+            .chars()
+            .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+            .collect();
+        if sanitized.len() > Self::SANITIZE_MAX_LEN {
+            sanitized.truncate(Self::SANITIZE_MAX_LEN);
+            sanitized.push_str("... [truncated]");
+        }
+        sanitized
     }
 
     pub async fn status(&self, event_id: Uuid) -> Result<Option<String>, sqlx::Error> {
@@ -498,5 +518,40 @@ mod tests {
         eventually(|| async { bus.status(envelope.id).await.unwrap() == Some("acked".into()) })
             .await;
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn sanitize_error_truncates_long_messages() {
+        let long = "x".repeat(500);
+        let result = SqliteBus::sanitize_error(&long);
+        assert_eq!(result.len(), 120 + "... [truncated]".len());
+        assert!(result.ends_with("... [truncated]"));
+    }
+
+    #[test]
+    fn sanitize_error_strips_control_chars() {
+        let msg = "normal\u{0}\u{1b} content";
+        let result = SqliteBus::sanitize_error(msg);
+        assert_eq!(result, "normal content");
+    }
+
+    #[test]
+    fn sanitize_error_preserves_newlines_and_tabs() {
+        let msg = "line1\n\tline2";
+        let result = SqliteBus::sanitize_error(msg);
+        assert_eq!(result, "line1\n\tline2");
+    }
+
+    #[test]
+    fn sanitize_error_leaves_short_messages_unchanged() {
+        let msg = "short error";
+        let result = SqliteBus::sanitize_error(msg);
+        assert_eq!(result, "short error");
+    }
+
+    #[test]
+    fn sanitize_error_handles_empty_string() {
+        let result = SqliteBus::sanitize_error("");
+        assert_eq!(result, "");
     }
 }
