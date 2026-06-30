@@ -195,4 +195,50 @@ mod tests {
 
         assert_eq!(error, EnvelopeError::InvalidSchemaVersion);
     }
+
+    proptest::proptest! {
+        #[test]
+        fn valid_inputs_always_succeed(
+            event_type in proptest::string::string_regex(".+").unwrap(),
+            source in proptest::string::string_regex(".+").unwrap(),
+            schema_version in 1u32..1000,
+        ) {
+            let envelope = EventEnvelope::builder(event_type, source, serde_json::json!({}))
+                .schema_version(schema_version)
+                .build()
+                .expect("valid inputs must succeed");
+            assert_eq!(envelope.schema_version, schema_version);
+            assert!(envelope.validate().is_ok());
+        }
+
+        #[test]
+        fn empty_event_type_always_fails(et in proptest::string::string_regex("\\s*").unwrap()) {
+            let result = EventEnvelope::builder(et, "source", serde_json::json!({}))
+                .build();
+            match result {
+                Err(EnvelopeError::EmptyEventType) => {}
+                Err(other) => panic!("unexpected error: {other}"),
+                Ok(_) => panic!("expected EmptyEventType"),
+            }
+        }
+
+        #[test]
+        fn empty_source_always_fails(src in proptest::string::string_regex("\\s*").unwrap()) {
+            let result = EventEnvelope::builder("event.type", src, serde_json::json!({}))
+                .build();
+            match result {
+                Err(EnvelopeError::EmptySource) => {}
+                Err(other) => panic!("unexpected error: {other}"),
+                Ok(_) => panic!("expected EmptySource"),
+            }
+        }
+    }
+
+    #[test]
+    fn zero_schema_version_always_fails_prop() {
+        let result = EventEnvelope::builder("event.type", "source", serde_json::json!({}))
+            .schema_version(0u32)
+            .build();
+        assert_eq!(result, Err(EnvelopeError::InvalidSchemaVersion));
+    }
 }

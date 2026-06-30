@@ -5,6 +5,9 @@ edition = "2021"
 
 [workspace]
 
+[dev-dependencies]
+proptest = "1"
+
 [dependencies]
 async-trait = "0.1"
 async-channel = "2.3"

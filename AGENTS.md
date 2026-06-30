@@ -10,7 +10,7 @@
 
 ## Build & Test
 ```bash
-cargo test          # 22 tests (bus, core, envelope, projection, schema, observability)
+cargo test          # 32 tests (bus, core, envelope, projection, schema, observability)
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo doc --no-deps
@@ -27,7 +27,7 @@ cargo doc --no-deps
 | `src/observability.rs` | `init_tracing()`, counters, span generation |
 
 ## Hygiene Rules
-- Keep `Cargo.lock` in `.gitignore` (library crate)
+- Dependabot configured for weekly cargo + GitHub Actions updates
 - No `target/` or `pheno-events/build/` in tree (`.gitignore` handles it)
 - All PRs must pass `fmt`, `clippy`, and `test` (CI enforces)
 - `SECURITY.md` exists for vulnerability reporting
