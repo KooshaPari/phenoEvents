@@ -81,41 +81,33 @@ impl Bus for InMemoryBus {
 
         let event_id = envelope.id;
 
-        // Capture the per-subscriber senders and the previous `last_seen`
-        // under a single lock so the value we hand each worker matches the
-        // event-ordering contract (worker for event B sees `last_seen == A`,
-        // worker for event A sees `last_seen == None`).
-        let (senders, prev_last_seen): (Vec<Sender<(EventEnvelope, Option<Uuid>)>>, Option<Uuid>) = {
-            let inner = self.inner.lock().await;
-            (
-                inner
-                    .subscribers
-                    .values()
-                    .map(|s| s.sender.clone())
-                    .collect(),
-                inner.last_seen,
-            )
-        };
-
-        let duplicate = {
+        // Single critical section: capture subscriber senders, check/update
+        // the seen set for dedup, capture the last-seen before this event,
+        // and advance last_seen — all atomically.
+        let (senders, duplicate, prev_last_seen): (
+            Vec<Sender<(EventEnvelope, Option<Uuid>)>>,
+            bool,
+            Option<Uuid>,
+        ) = {
             let mut inner = self.inner.lock().await;
-            if inner.seen.contains(&event_id) {
-                true
-            } else {
+            let senders: Vec<_> = inner
+                .subscribers
+                .values()
+                .map(|s| s.sender.clone())
+                .collect();
+            let duplicate = inner.seen.contains(&event_id);
+            if !duplicate {
                 inner.seen.insert(event_id);
-                false
             }
+            let prev_last_seen = inner.last_seen;
+            inner.last_seen = Some(event_id);
+            (senders, duplicate, prev_last_seen)
         };
 
         for sender in senders {
             // A full queue would block; we drop the send rather than block
             // the publisher. In-memory bus has no retry/DLQ story by design.
             let _ = sender.try_send((envelope.clone(), prev_last_seen));
-        }
-
-        {
-            let mut inner = self.inner.lock().await;
-            inner.last_seen = Some(event_id);
         }
 
         Ok(Ack {

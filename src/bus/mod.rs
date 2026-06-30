@@ -196,10 +196,15 @@ impl SqliteBus {
 
     async fn mark_failed(&self, event_id: Uuid, error: String) -> Result<(), sqlx::Error> {
         let now = Utc::now();
-        let attempts: i64 = sqlx::query_scalar("SELECT attempts FROM outbox WHERE event_id = ?")
-            .bind(event_id.to_string())
-            .fetch_one(&self.db)
-            .await?;
+        let attempts: Option<i64> =
+            sqlx::query_scalar("SELECT attempts FROM outbox WHERE event_id = ?")
+                .bind(event_id.to_string())
+                .fetch_optional(&self.db)
+                .await?;
+        let Some(attempts) = attempts else {
+            // Event was already removed from the outbox — nothing to update.
+            return Ok(());
+        };
         let next_attempts = attempts + 1;
         let status = if next_attempts >= self.max_retries {
             "dlq"
@@ -267,10 +272,10 @@ impl SqliteBus {
             .await
     }
 
-    pub async fn attempts(&self, event_id: Uuid) -> Result<i64, sqlx::Error> {
+    pub async fn attempts(&self, event_id: Uuid) -> Result<Option<i64>, sqlx::Error> {
         sqlx::query_scalar("SELECT attempts FROM outbox WHERE event_id = ?")
             .bind(event_id.to_string())
-            .fetch_one(&self.db)
+            .fetch_optional(&self.db)
             .await
     }
 }
@@ -431,7 +436,7 @@ mod tests {
 
         eventually(|| async { bus.status(envelope.id).await.unwrap() == Some("acked".into()) })
             .await;
-        assert_eq!(bus.attempts(envelope.id).await.expect("attempts"), 1);
+        assert_eq!(bus.attempts(envelope.id).await.expect("attempts"), Some(1));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -447,7 +452,7 @@ mod tests {
         bus.publish(envelope.clone()).await.expect("publish");
 
         eventually(|| async { bus.status(envelope.id).await.unwrap() == Some("dlq".into()) }).await;
-        assert_eq!(bus.attempts(envelope.id).await.expect("attempts"), 2);
+        assert_eq!(bus.attempts(envelope.id).await.expect("attempts"), Some(2));
     }
     #[tokio::test]
     async fn handler_receives_last_seen_for_idempotency_context() {
@@ -476,6 +481,13 @@ mod tests {
         let values = last_seen_values.lock().expect("values");
         assert_eq!(values[0], None);
         assert_eq!(values[1], Some(first.id));
+    }
+
+    #[tokio::test]
+    async fn attempts_returns_none_for_unknown_event() {
+        let bus = bus().await;
+        let result = bus.attempts(Uuid::now_v7()).await.expect("query");
+        assert_eq!(result, None);
     }
 
     #[tokio::test]
