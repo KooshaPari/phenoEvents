@@ -310,4 +310,138 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn rejects_zero_version_on_register() {
+        let mut registry = SchemaRegistry::new();
+        let result = registry.register("user.created".to_string(), 0, user_created_schema());
+        assert_eq!(result, Err(ValidationError::InvalidVersion));
+    }
+
+    #[test]
+    fn rejects_breaking_change_removed_property() {
+        let mut registry = SchemaRegistry::new();
+        registry
+            .register("user.created".to_string(), 1, user_created_schema())
+            .expect("v1");
+
+        let v2 = json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        });
+        let error = registry
+            .register("user.created".to_string(), 2, v2)
+            .expect_err("removing properties is a breaking change");
+        assert!(matches!(error, ValidationError::BreakingChange(_)));
+    }
+
+    #[test]
+    fn rejects_breaking_change_changed_property_type() {
+        let mut registry = SchemaRegistry::new();
+        registry
+            .register("user.created".to_string(), 1, user_created_schema())
+            .expect("v1");
+
+        let v2 = json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer" },
+                "email": { "type": "string" }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        });
+        let error = registry
+            .register("user.created".to_string(), 2, v2)
+            .expect_err("changing property type is a breaking change");
+        assert!(matches!(error, ValidationError::BreakingChange(_)));
+    }
+
+    #[test]
+    fn rejects_breaking_change_new_required_field() {
+        let mut registry = SchemaRegistry::new();
+        registry
+            .register("user.created".to_string(), 1, user_created_schema())
+            .expect("v1");
+
+        let v2 = json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "email": { "type": "string" },
+                "name": { "type": "string" }
+            },
+            "required": ["id", "name"],
+            "additionalProperties": false
+        });
+        let error = registry
+            .register("user.created".to_string(), 2, v2)
+            .expect_err("adding a required field is a breaking change");
+        assert!(matches!(error, ValidationError::BreakingChange(_)));
+    }
+
+    #[test]
+    fn allows_additive_change() {
+        let mut registry = SchemaRegistry::new();
+        registry
+            .register("user.created".to_string(), 1, user_created_schema())
+            .expect("v1");
+
+        let v2 = json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "email": { "type": "string" },
+                "name": { "type": "string" }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        });
+        registry
+            .register("user.created".to_string(), 2, v2)
+            .expect("adding optional fields is additive");
+    }
+
+    #[test]
+    fn rejects_invalid_schema_not_an_object() {
+        let mut registry = SchemaRegistry::new();
+        let error = registry
+            .register("bad".to_string(), 1, json!("string"))
+            .expect_err("not an object");
+        assert!(matches!(error, ValidationError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_schema_properties_not_an_object() {
+        let mut registry = SchemaRegistry::new();
+        let error = registry.register("bad".to_string(), 1, json!({"properties": "string"}));
+        assert!(matches!(error, Err(ValidationError::InvalidSchema(_))));
+    }
+
+    #[test]
+    fn payload_type_mismatch_is_rejected() {
+        let mut registry = SchemaRegistry::new();
+        registry
+            .register(
+                "item".to_string(),
+                1,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }),
+            )
+            .expect("schema");
+
+        let error = registry
+            .validate("item".to_string(), 1, &json!({"name": 42}))
+            .expect_err("type mismatch");
+        assert!(matches!(error, ValidationError::PayloadInvalid(_)));
+    }
 }
