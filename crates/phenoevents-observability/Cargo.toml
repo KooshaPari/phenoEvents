@@ -1,0 +1,14 @@
+[package]
+name = "phenoevents-observability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OTel/OTLP observability for phenoEvents (re-exports pheno-tracing)"
+
+[dependencies]
+# pheno-tracing is the fleet-canonical OTLP tracer (ADR-012)
+pheno-tracing = { git = "https://github.com/KooshaPari/pheno-tracing", tag = "v0.4.0" }
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,74 @@
+name: observability-smoke
+
+on:
+  push:
+    branches:
+      - feat/t22-observability-pheno-tracing-otlp-2026-06-20
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  otlp-smoke:
+    name: OTLP smoke (otel-collector + pheno-tracing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      otel-collector:
+        image: otel/opentelemetry-collector-contrib:0.96.0
+        env:
+          OTELCOL_CONFIG: |
+            receivers:
+              otlp:
+                protocols:
+                  grpc:
+                    endpoint: 0.0.0.0:4317
+                  http:
+                    endpoint: 0.0.0.0:4318
+            processors:
+              batch: {}
+            exporters:
+              debug: {}
+            service:
+              pipelines:
+                traces:
+                  receivers: [otlp]
+                  processors: [batch]
+                  exporters: [debug]
+        ports:
+          - 4317:4317
+          - 4318:4318
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:13133/ || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "phenoevents-observability"
+      - name: Build observability crate
+        run: cargo build -p phenoevents-observability
+      - name: Run unit tests
+        run: cargo test -p phenoevents-observability --no-fail-fast
+      - name: Smoke test — assert OTLP receiver is reachable
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4317
+          OTEL_SERVICE_NAME: pheno-events-smoke
+        run: |
+          set -e
+          curl -sf http://localhost:13133/ > /dev/null && echo "OTEL_COLLECTOR_HEALTH_OK"
+          python3 - <<'PY'
+          import socket
+          s = socket.socket()
+          s.settimeout(2)
+          try:
+              s.connect(("127.0.0.1", 4317))
+              print("OTLP_PORT_OPEN")
+          finally:
+              s.close()
+          PY

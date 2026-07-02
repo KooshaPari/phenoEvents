@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
+members = [".", "crates/phenoevents-observability"]
 
 [dependencies]
 async-trait = "0.1"
@@ -25,6 +26,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+phenoevents-observability = { path = "crates/phenoevents-observability" }
 uuid = { version = "1", features = ["serde", "v7"] }
 
 [dev-dependencies]
