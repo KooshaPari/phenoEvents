@@ -36,7 +36,7 @@ jobs:
       - name: Run coverage
         run: cargo tarpaulin --out Xml --output-dir coverage/ --exclude-files "benches/*"
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: coverage/cobertura.xml
           fail_ci_if_error: false
