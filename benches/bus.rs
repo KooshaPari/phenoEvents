@@ -1,7 +1,10 @@
 // Criterion benchmarks for SqliteBus publish/subscribe throughput.
 // Run: cargo bench --bench bus
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use pheno_events::{bus::{Bus, SqliteBus}, core::EventEnvelope};
+use pheno_events::{
+    bus::{Bus, SqliteBus},
+    core::EventEnvelope,
+};
 use serde_json::json;
 use sqlx::SqlitePool;
 
