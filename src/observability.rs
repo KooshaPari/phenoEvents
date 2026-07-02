@@ -1,9 +1,9 @@
 use crate::core::EventEnvelope;
+use pheno_tracing::compat::{span, Level, Span};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, OnceLock,
 };
-use tracing::{span, Level, Span};
 
 static TRACING_INIT: OnceLock<()> = OnceLock::new();
 
@@ -12,6 +12,19 @@ static TRACING_INIT: OnceLock<()> = OnceLock::new();
 /// Safe to call multiple times — only the first call has any effect. The
 /// default filter is `info,pheno_events=debug,sqlx=warn` so the bus and
 /// projections are visible by default while noisy sqlx spans are muted.
+///
+/// # OTLP export (ADR-036B / ADR-037)
+///
+/// `pheno-events` adopts the canonical `pheno-tracing` port contract
+/// (ADR-036) and the `pheno-otel` OTLP exporter (ADR-037). To wire
+/// OTLP/HTTP export in a downstream binary, install a
+/// [`pheno_otel::exporters::http::HttpExporter`] (or `StdoutExporter` for
+/// local dev) and bridge it into the `tracing-subscriber` registry via
+/// `tracing_opentelemetry::layer()`. See `examples/otel_quickstart.rs` for
+/// a complete reference wiring. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set,
+/// downstream binaries should attach the OTLP layer; this crate does not
+/// register it automatically because the OpenTelemetry SDK selection is a
+/// binary-level decision.
 pub fn init_tracing() {
     TRACING_INIT.get_or_init(|| {
         use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -126,5 +139,34 @@ mod tests {
         std::env::set_var("RUST_LOG", "warn");
         init_tracing();
         std::env::remove_var("RUST_LOG");
+    }
+
+    #[test]
+    fn pheno_tracing_compat_macros_resolve() {
+        // Smoke test: the `pheno_tracing::compat` re-exports used in this
+        // module resolve and behave like the upstream `tracing` macros.
+        // This guards against an upstream `tracing` 0.2 bump silently
+        // breaking the in-crate span helpers (per ADR-036 forward-compat
+        // shim contract).
+        use pheno_tracing::compat::{info, span};
+        let g = span!(Level::INFO, "compat-smoke");
+        info!(parent: &g, "pheno-events compat smoke");
+    }
+
+    #[test]
+    fn pheno_otel_http_exporter_smoke() {
+        // Smoke test: the `pheno-otel` HttpExporter is constructible from
+        // an ExporterConfig and reports the right `name()` and endpoint
+        // back through the OtlpPort trait. This proves the OTLP wire-format
+        // adapter boundary is reachable from `pheno-events` without
+        // requiring a live collector.
+        use pheno_otel::exporters::ExporterConfig;
+        use pheno_otel::exporters::http::HttpExporter;
+        use pheno_otel::OtlpPort;
+        let cfg = ExporterConfig::new("http://localhost:4318", "pheno-events");
+        let exp = HttpExporter::traces(cfg);
+        assert_eq!(exp.name(), "http");
+        assert_eq!(exp.target_url(), "http://localhost:4318/v1/traces");
+        assert!(exp.health().is_ok());
     }
 }
