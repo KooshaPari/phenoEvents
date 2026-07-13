@@ -278,6 +278,28 @@ impl SqliteBus {
             .fetch_optional(&self.db)
             .await
     }
+
+    pub async fn last_error(&self, event_id: Uuid) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query("SELECT last_error FROM outbox WHERE event_id = ?")
+            .bind(event_id.to_string())
+            .fetch_optional(&self.db)
+            .await?;
+        Ok(row.and_then(|row| row.get("last_error")))
+    }
+
+    pub async fn pending_count(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox WHERE status IN ('pending', 'retrying', 'in_progress')",
+        )
+        .fetch_one(&self.db)
+        .await
+    }
+
+    pub async fn dlq_count(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox WHERE status = 'dlq'")
+            .fetch_one(&self.db)
+            .await
+    }
 }
 
 #[async_trait]
@@ -384,6 +406,8 @@ mod tests {
             bus.status(envelope.id).await.expect("status"),
             Some("pending".into())
         );
+        assert_eq!(bus.pending_count().await.expect("pending count"), 1);
+        assert_eq!(bus.dlq_count().await.expect("dlq count"), 0);
     }
 
     #[tokio::test]
@@ -412,6 +436,7 @@ mod tests {
             bus.status(envelope.id).await.expect("status"),
             Some("acked".into())
         );
+        assert_eq!(bus.pending_count().await.expect("pending count"), 0);
     }
 
     #[tokio::test]
@@ -453,6 +478,12 @@ mod tests {
 
         eventually(|| async { bus.status(envelope.id).await.unwrap() == Some("dlq".into()) }).await;
         assert_eq!(bus.attempts(envelope.id).await.expect("attempts"), Some(2));
+        assert_eq!(
+            bus.last_error(envelope.id).await.expect("last error"),
+            Some("handler nack: always fails".into())
+        );
+        assert_eq!(bus.pending_count().await.expect("pending count"), 0);
+        assert_eq!(bus.dlq_count().await.expect("dlq count"), 1);
     }
     #[tokio::test]
     async fn handler_receives_last_seen_for_idempotency_context() {
