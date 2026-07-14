@@ -9,7 +9,7 @@ description = "OTel/OTLP observability for phenoEvents"
 [dependencies]
 opentelemetry = "0.26"
 opentelemetry-otlp = { version = "0.26", features = ["grpc-tonic"] }
-opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-opentelemetry = "0.27"
