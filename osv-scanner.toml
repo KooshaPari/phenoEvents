@@ -1,4 +1,0 @@
-[[IgnoredVulns]]
-id = "GHSA-w9wp-h8wv-79jx"
-ignoreUntil = 2026-09-30
-reason = "Temporary compatibility exception while the Eventra parity migration is upgraded as one OpenTelemetry 0.32 dependency set."
