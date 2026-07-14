@@ -16,22 +16,12 @@ repository = "https://github.com/KooshaPari/phenoEvents"
 async-trait = "0.1"
 async-channel = "2.3"
 chrono = { version = "0.4", features = ["serde"] }
-# Canonical distributed-tracing port contract (ADR-036 / ADR-036B). Adopting
-# pheno-tracing here gives `pheno-events` the fleet-wide TracePort shape; the
-# compat shim re-exports the standard `tracing` macros so the in-crate span
-# helpers (`observability::trace_envelope`) compile unchanged.
-pheno-tracing = { path = "../pheno-tracing" }
-# Canonical OTLP wire-format exporter (ADR-037). `pheno-events` adopts this as
-# the substrate-boundary export path; concrete StdoutExporter / HttpExporter
-# adapters are selected by the consumer at runtime.
-pheno-otel = { path = "../pheno-otel" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 phenoevents-observability = { path = "crates/phenoevents-observability" }
 uuid = { version = "1", features = ["serde", "v7"] }
 

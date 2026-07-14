@@ -17,7 +17,7 @@ Eventra's runtime-bus boundary says new reusable runtime-bus capabilities belong
 
 | Eventra #65 behavior | phenoEvents canonical location | Disposition |
 | --- | --- | --- |
-| OTLP initialization helper | `crates/phenoevents-observability` and `src/observability.rs` | Already covered by pheno-tracing/pheno-otel adoption. Do not copy Eventra's `eventkit-obs` API. |
+| OTLP initialization helper | `crates/phenoevents-observability` and `src/observability.rs` | Implemented locally in the canonical repository. Do not copy Eventra's `eventkit-obs` API or depend on unavailable external tracing repositories. |
 | SQLite-backed outbox | `src/bus/mod.rs::SqliteBus` | Already covered by the canonical `SqliteBus` outbox, at-least-once delivery, idempotent duplicate detection, retries, and DLQ. |
 | Pending outbox count for health/metrics | `SqliteBus::pending_count` | Added as the canonical inspection surface for actionable queued work. |
 | DLQ count for operators | `SqliteBus::dlq_count` | Added as the canonical inspection surface for exhausted retries. |

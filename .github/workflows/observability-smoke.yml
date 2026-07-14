@@ -10,7 +10,7 @@ on:
 
 jobs:
   otlp-smoke:
-    name: OTLP smoke (otel-collector + pheno-tracing)
+    name: OTLP smoke (otel-collector + phenoevents-observability)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:

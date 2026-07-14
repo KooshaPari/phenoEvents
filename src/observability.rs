@@ -1,5 +1,4 @@
 use crate::core::EventEnvelope;
-use phenoevents_observability::prelude::{info, instrument};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, OnceLock,
@@ -15,22 +14,11 @@ static TRACING_INIT: OnceLock<()> = OnceLock::new();
 /// projections are visible by default while noisy sqlx spans are muted.
 ///
 /// If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, also exports spans to the
-/// configured OTLP collector via `pheno-tracing` (canonical per ADR-012).
+/// configured OTLP collector through `phenoevents-observability`.
 pub fn init_tracing() {
     TRACING_INIT.get_or_init(|| {
-        use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info,pheno_events=debug,sqlx=warn"));
-        let _ = tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer().with_target(false))
-            .try_init();
-
-        // OTLP export (best-effort — does not block startup if collector is down)
-        if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
-            let _ = phenoevents_observability::init_tracing("pheno-events", &endpoint);
-            info!(endpoint = %endpoint, "pheno-events OTLP tracing initialised");
-        }
+        let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        let _ = phenoevents_observability::init_tracing("pheno-events", endpoint.as_deref());
     });
 }
 
