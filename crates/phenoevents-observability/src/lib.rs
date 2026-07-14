@@ -6,9 +6,8 @@
 
 #![warn(missing_docs)]
 
-use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
+use opentelemetry::{global, trace::TracerProvider as _};
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::runtime::Tokio;
 use opentelemetry_sdk::{trace, Resource};
 use thiserror::Error;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -38,18 +37,19 @@ pub fn init_tracing(service_name: &str, endpoint: Option<&str>) -> Result<(), In
     let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
 
     if let Some(endpoint) = endpoint {
-        let provider = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(
-                opentelemetry_otlp::new_exporter()
-                    .tonic()
-                    .with_endpoint(endpoint),
-            )
-            .with_trace_config(trace::Config::default().with_resource(Resource::new(vec![
-                KeyValue::new("service.name", service_name.to_owned()),
-            ])))
-            .install_batch(Tokio)
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
             .map_err(|error| InitError::Otlp(error.to_string()))?;
+        let provider = trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                Resource::builder()
+                    .with_service_name(service_name.to_owned())
+                    .build(),
+            )
+            .build();
         global::set_tracer_provider(provider.clone());
         let tracer = provider.tracer(service_name.to_owned());
 
