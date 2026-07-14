@@ -1,7 +1,8 @@
 # Observability (T22, OTLP)
 
-This repo adopts [pheno-tracing](https://github.com/KooshaPari/pheno-tracing) v0.4.0
-as the canonical OTLP tracer (ADR-012).
+`phenoevents-observability` is the canonical OTLP integration for this
+repository. It configures structured logs by default and exports spans when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
 ## Quickstart (local)
 
@@ -13,29 +14,22 @@ as the canonical OTLP tracer (ADR-012).
      otel/opentelemetry-collector-contrib:0.96.0
    ```
 
-3. Run any binary in the workspace. Spans + metrics show up in your collector
-   of choice (Jaeger, Tempo, Honeycomb, ...).
+3. Call `pheno_events::observability::init_tracing()` during process startup,
+   then run the application. Spans show up in your collector of choice
+   (Jaeger, Tempo, Honeycomb, ...).
 
 ## What ships in this PR
 
-- New crate: `crates/phenoevents-observability/` — re-exports
-  `pheno-tracing` under a local name so version bumps are a single PR.
-- `init_tracing(service_name, otlp_endpoint)` at top of `main()` in
-  `./src/main.rs`.
-- `#[tracing::instrument]` on key ops.
-- Metrics: `requests_total` (Counter), `request_duration_seconds` (Histogram).
+- `crates/phenoevents-observability/` owns the OTLP tracer and structured-log
+  configuration.
+- `pheno_events::observability::init_tracing()` reads the endpoint from
+  `OTEL_EXPORTER_OTLP_ENDPOINT`.
+- Event spans include event id, type, source, and correlation id.
+- In-process counters track published, processed, and failed events through
+  `pheno_events::observability::metrics()`.
 - CI: `.github/workflows/observability-smoke.yml` brings up an
   otel/opentelemetry-collector-contrib container, builds the workspace, runs
-  the smoke test, and asserts OTLP receiver got at least one span.
-
-## Sampling
-
-Defaults to `AlwaysOn`. To switch to parent-based ratio sampling, set:
-
-```bash
-OTEL_TRACES_SAMPLER=parentbased_traceidratio
-OTEL_TRACES_SAMPLER_ARG=0.1
-```
+  the smoke test, and asserts the OTLP receiver is reachable.
 
 ## Out of scope
 

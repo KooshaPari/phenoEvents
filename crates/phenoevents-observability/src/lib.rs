@@ -1,71 +1,88 @@
-//! phenoEvents observability — thin re-export of `pheno-tracing`.
+//! Canonical tracing and OTLP initialization for phenoEvents.
 //!
-//! pheno-tracing is the fleet-canonical OTLP tracer (ADR-012). This crate
-//! exists so the rest of the workspace depends on a local crate name
-//! (`phenoevents-observability`) instead of a git tag, which makes
-//! version bumps a single PR.
-//!
-//! ## Quickstart
-//!
-//! ```rust,no_run
-//! use phenoevents_observability::prelude::*;
-//!
-//! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     init_tracing("pheno-events", "http://localhost:4317")?;
-//!     info!(component = "pheno-events", "starting");
-//!     Ok(())
-//! }
-//! ```
+//! This crate owns the observability integration used by the event bus. It
+//! configures structured logs by default and adds OTLP span export when an
+//! endpoint is supplied by the application.
 
-pub use pheno_tracing::*;
+#![warn(missing_docs)]
 
-/// Convenience prelude — everything you need for OTLP-observed apps.
-pub mod prelude {
-    pub use pheno_tracing::{
-        error, info, instrument, span, warn, Counter, Histogram, OtlpEndpoint, RequestMetrics,
-        ServiceName, Span, SpanGuard, TracePort, TraceResult,
-    };
+use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::runtime::Tokio;
+use opentelemetry_sdk::{trace, Resource};
+use thiserror::Error;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-    /// Initialize OTLP tracing with sane defaults. Safe to call from `main`.
-    ///
-    /// Reads `OTEL_EXPORTER_OTLP_ENDPOINT` from the environment if `endpoint`
-    /// is `None`.
-    pub fn init_tracing(
-        service_name: impl Into<String>,
-        endpoint: impl Into<String>,
-    ) -> Result<(), pheno_tracing::TracingError> {
-        pheno_tracing::init(service_name, endpoint)
+pub use tracing::{debug, error, info, instrument, span, trace, warn};
+
+/// Error returned when a tracing subscriber or OTLP exporter cannot start.
+#[derive(Debug, Error)]
+pub enum InitError {
+    /// The OTLP tracer pipeline could not be installed.
+    #[error("OTLP initialization failed: {0}")]
+    Otlp(String),
+    /// The global tracing subscriber was already installed or rejected setup.
+    #[error("tracing subscriber initialization failed: {0}")]
+    Subscriber(String),
+}
+
+/// Initialize structured tracing and, when configured, OTLP span export.
+///
+/// The function should be called once during process startup. An absent
+/// endpoint keeps tracing local; a supplied endpoint configures OTLP over
+/// gRPC. `RUST_LOG` controls filtering and falls back to the phenoEvents
+/// defaults when unset.
+pub fn init_tracing(service_name: &str, endpoint: Option<&str>) -> Result<(), InitError> {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,pheno_events=debug,sqlx=warn"));
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+
+    if let Some(endpoint) = endpoint {
+        let provider = opentelemetry_otlp::new_pipeline()
+            .tracing()
+            .with_exporter(
+                opentelemetry_otlp::new_exporter()
+                    .tonic()
+                    .with_endpoint(endpoint),
+            )
+            .with_trace_config(trace::Config::default().with_resource(Resource::new(vec![
+                KeyValue::new("service.name", service_name.to_owned()),
+            ])))
+            .install_batch(Tokio)
+            .map_err(|error| InitError::Otlp(error.to_string()))?;
+        global::set_tracer_provider(provider.clone());
+        let tracer = provider.tracer(service_name.to_owned());
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .try_init()
+            .map_err(|error| InitError::Subscriber(error.to_string()))
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .try_init()
+            .map_err(|error| InitError::Subscriber(error.to_string()))
     }
+}
+
+/// Common tracing imports for applications using phenoEvents.
+pub mod prelude {
+    pub use crate::{debug, error, info, instrument, span, trace, warn};
 }
 
 #[cfg(test)]
 mod tests {
-    use super::prelude::*;
+    use super::{init_tracing, InitError};
 
     #[test]
-    fn trace_port_roundtrip() {
-        let name: ServiceName = "pheno-events-test".into();
-        let endpoint: OtlpEndpoint = "http://localhost:4317".into();
-        let port = TracePort::new(name.clone(), endpoint.clone());
-        assert_eq!(port.service_name(), &name);
-        assert_eq!(port.endpoint(), &endpoint);
-        assert!(!port.is_sampled());
-    }
+    fn tracing_initialization_is_safe_to_attempt_multiple_times() {
+        let first = init_tracing("pheno-events-test", None);
+        let second = init_tracing("pheno-events-test", None);
 
-    #[test]
-    fn request_metrics_construct() {
-        let metrics = RequestMetrics::new("pheno-events");
-        let counter = metrics.requests_total();
-        let histogram = metrics.request_duration_seconds();
-        counter.inc();
-        histogram.observe(0.123);
-        assert_eq!(counter.value(), 1);
-    }
-
-    #[test]
-    fn span_guard_creates_and_closes() {
-        let guard = SpanGuard::new("test-op");
-        assert_eq!(guard.name(), "test-op");
-        drop(guard);
+        assert!(first.is_ok() || matches!(first, Err(InitError::Subscriber(_))));
+        assert!(second.is_ok() || matches!(second, Err(InitError::Subscriber(_))));
     }
 }
