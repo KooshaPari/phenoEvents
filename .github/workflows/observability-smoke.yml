@@ -39,7 +39,7 @@ jobs:
           - 4317:4317
           - 4318:4318
         options: >-
-          --health-cmd "otelcol-contrib --version || exit 1"
+          --health-cmd "/otelcol-contrib --version || exit 1"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
