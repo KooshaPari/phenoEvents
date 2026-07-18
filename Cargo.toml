@@ -1,0 +1,37 @@
+[package]
+name = "phenotype-event-bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed async pub/sub for Phenotype — durable SqliteBus, InMemoryBus, schema registry, projections"
+repository.workspace = true
+
+[lib]
+name = "pheno_events"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+async-channel = "2.3"
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+phenoevents-observability = { path = "../phenoevents-observability" }
+uuid = { version = "1", features = ["serde", "v7"] }
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
+proptest = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+
+[[bench]]
+name = "bus"
+harness = false
+
+[[bench]]
+name = "schema"
+harness = false
