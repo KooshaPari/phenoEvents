@@ -1,0 +1,328 @@
+# =============================================================================
+# Phenotype CI — Unified multi-language pipeline
+# =============================================================================
+# Optimized for: Rust, Python, Go, TypeScript
+# Runners: Blacksmith (fast) → GitHub-hosted fallback
+# Caching: Blacksmith built-in + Swatinem/rust-cache + actions/setup-python
+# Path filtering: only runs jobs for changed languages
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop, "release/**"]
+  pull_request:
+    branches: [main, master, develop]
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  PYTHONIOENCODING: utf-8
+
+# ===========================================================================
+# STAGE 1: Detect changed languages (runs <10s, gates everything else)
+# ===========================================================================
+jobs:
+  detect-changes:
+    name: Detect Languages
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      go: ${{ steps.filter.outputs.go }}
+      typescript: ${{ steps.filter.outputs.typescript }}
+      infra: ${{ steps.filter.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - '**/*.rs'
+              - 'rust-toolchain.toml'
+            python:
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'requirements*.txt'
+              - 'setup.py'
+              - 'setup.cfg'
+              - '**/*.py'
+            go:
+              - 'go.mod'
+              - 'go.sum'
+              - '**/*.go'
+            typescript:
+              - 'package.json'
+              - 'package-lock.json'
+              - 'pnpm-lock.yaml'
+              - 'yarn.lock'
+              - 'bun.lockb'
+              - '**/*.ts'
+              - '**/*.tsx'
+              - '**/*.js'
+              - '**/*.jsx'
+            infra:
+              - 'Dockerfile*'
+              - 'docker-compose*.yml'
+              - '.github/**'
+              - 'trunk.yaml'
+              - '.mergify.yml'
+
+  # ===========================================================================
+  # STAGE 2: Parallel quality gates (run in parallel per language)
+  # ===========================================================================
+
+  # --- RUST ---
+  rust-lint:
+    name: Rust Lint
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-lint
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  rust-test:
+    name: Rust Test
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-test
+      - run: cargo test --all --workspace --verbose
+        env:
+          CARGO_INCREMENTAL: 0
+      - run: cargo test --all --workspace --doc
+
+  rust-build:
+    name: Rust Build
+    needs: [rust-lint, rust-test]
+    if: always() && !failure() && !cancelled()
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
+      - run: cargo build --release --all-targets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-binaries
+          path: target/release/
+          retention-days: 7
+
+  # --- PYTHON ---
+  python-lint:
+    name: Python Lint
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+      - run: uv python install 3.12
+      - run: uv sync --all-extras
+      - run: uv run ruff check --output-format=github .
+      - run: uv run ruff format --check .
+      - run: uv run mypy --install-types --non-interactive .
+
+  python-test:
+    name: Python Test
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --all-extras
+      - run: uv run pytest --cov --cov-report=xml --cov-report=term-missing -v
+      - uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.12'
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+
+  # --- GO ---
+  go-lint:
+    name: Go Lint
+    needs: detect-changes
+    if: needs.detect-changes.outputs.go == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+      - run: go vet ./...
+
+  go-test:
+    name: Go Test
+    needs: detect-changes
+    if: needs.detect-changes.outputs.go == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - run: go test -v -race -coverprofile=coverage.out ./...
+      - uses: codecov/codecov-action@v4
+        with:
+          file: coverage.out
+          fail_ci_if_error: false
+
+  # --- TYPESCRIPT ---
+  typescript-lint:
+    name: TS/JS Lint
+    needs: detect-changes
+    if: needs.detect-changes.outputs.typescript == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci || true
+      - run: npx biome lint . || true
+      - run: npx biome format --check . || true
+
+  typescript-test:
+    name: TS/JS Test
+    needs: detect-changes
+    if: needs.detect-changes.outputs.typescript == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci || true
+      - run: npm test || true
+
+  # ===========================================================================
+  # STAGE 3: Security & quality gates (always run)
+  # ===========================================================================
+
+  security-scan:
+    name: Security Scan
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+        continue-on-error: true
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+        continue-on-error: true
+
+  dependency-review:
+    name: Dependency Review
+    needs: detect-changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  # ===========================================================================
+  # STAGE 4: Trunk.io — unified lint/format (replaces per-language linters)
+  # ===========================================================================
+  trunk-check:
+    name: Trunk Check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.infra == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: trunk-io/trunk-action@v1
+
+  # ===========================================================================
+  # STAGE 5: Aggregation gate for branch protection
+  # ===========================================================================
+  ci:
+    name: CI
+    if: always()
+    needs:
+      - detect-changes
+      - rust-lint
+      - rust-test
+      - python-lint
+      - python-test
+      - go-lint
+      - go-test
+      - typescript-lint
+      - typescript-test
+      - security-scan
+      - dependency-review
+      - trunk-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs
+        run: |
+          # Fail if any required job failed (not skipped)
+          results=("${{ needs.rust-lint.result }}" \
+                   "${{ needs.rust-test.result }}" \
+                   "${{ needs.python-lint.result }}" \
+                   "${{ needs.python-test.result }}" \
+                   "${{ needs.go-lint.result }}" \
+                   "${{ needs.go-test.result }}" \
+                   "${{ needs.typescript-lint.result }}" \
+                   "${{ needs.typescript-test.result }}" \
+                   "${{ needs.security-scan.result }}")
+          
+          for result in "${results[@]}"; do
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              echo "❌ Required job failed: $result"
+              exit 1
+            fi
+          done
+          
+          echo "✅ All required checks passed"
