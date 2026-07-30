@@ -2,6 +2,7 @@
 name = "pheno-events"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [workspace]
 members = [".", "crates/phenoevents-observability"]
@@ -22,13 +23,14 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "chrono", "uuid
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
-phenoevents-observability = { path = "crates/phenoevents-observability" }
+phenoevents-observability = { path = "crates/phenoevents-observability", version = "0.1.0" }
 uuid = { version = "1", features = ["serde", "v7"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
 proptest = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+tempfile = "3"
 
 [[bench]]
 name = "bus"
