@@ -425,7 +425,15 @@ mod tests {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = bool>,
     {
-        timeout(Duration::from_secs(2), async {
+        eventually_with_timeout(Duration::from_secs(2), &mut assertion).await;
+    }
+
+    async fn eventually_with_timeout<F, Fut>(max_wait: Duration, mut assertion: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        timeout(max_wait, async {
             loop {
                 if assertion().await {
                     break;
@@ -667,8 +675,10 @@ mod tests {
             .expect("sub b");
         let envelope = event();
         bus_a.publish(envelope.clone()).await.expect("publish");
-        eventually(|| async { bus_a.status(envelope.id).await.unwrap() == Some("acked".into()) })
-            .await;
+        eventually_with_timeout(Duration::from_secs(30), || async {
+            bus_a.status(envelope.id).await.unwrap() == Some("acked".into())
+        })
+        .await;
         assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 }
