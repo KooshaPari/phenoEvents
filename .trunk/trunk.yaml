@@ -1,3 +1,4 @@
+---
 # Trunk configuration for the canonical phenoEvents repository.
 # Keep this file on the version 0.1 schema consumed by current Trunk CLI.
 version: 0.1
