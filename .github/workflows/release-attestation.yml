@@ -30,7 +30,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != v[0-9]*.[0-9]*.[0-9]* ]]; then
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release attestation requires a versioned vX.Y.Z tag; got ${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}" >&2
             exit 1
           fi
@@ -82,9 +82,10 @@ jobs:
           ls -la release-artifacts/
 
       - name: Upload artifacts for provenance
+        id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-artifacts
+          name: release-artifacts.zip
           path: ${{ env.CARGO_WORKDIR }}/release-artifacts/
           if-no-files-found: warn
           retention-days: 90
@@ -92,4 +93,5 @@ jobs:
       - name: Attest build provenance (SLSA Build L2)
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-path: release-artifacts/*
+          subject-name: release-artifacts.zip
+          subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}

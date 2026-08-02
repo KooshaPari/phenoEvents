@@ -49,11 +49,11 @@ and is triggered:
 4. **Build** — `cargo build --release --locked --workspace --all-targets`.
 5. **Stage** — collect built executables, source tarball, and a build
    manifest into `release-artifacts/`.
-6. **Upload** — publish `release-artifacts` as a GitHub Actions artifact
-   (90 day retention).
+6. **Upload** — publish the staged directory as the named
+   `release-artifacts.zip` GitHub Actions artifact (90 day retention).
 7. **Attest** — generate GitHub Artifact Attestation provenance with the
-   pinned `actions/attest-build-provenance@v2` action over every staged file
-   matching `release-artifacts/*`.
+   pinned `actions/attest-build-provenance@v2` action over the uploaded archive
+   digest returned by `actions/upload-artifact`.
 
 ## Verification
 
@@ -64,14 +64,9 @@ Consumers can verify a release artifact's provenance using the
 gh attestation verify <artifact> --owner <org>
 ```
 
-Or with [`cosign`][cosign]:
-
-```bash
-cosign verify-attestation \
-  --certificate-identity-regexp 'https://github.com/slsa-framework/slsa-github-generator' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  <artifact>
-```
+The GitHub CLI verification is authoritative for this workflow. Do not infer
+cosign certificate identity or L2 completion until a real versioned-tag run
+records the attestation bundle and its verified subject digest.
 
 The in-toto provenance attestation (`actions/attest-build-provenance`)
 contains:
@@ -93,7 +88,7 @@ additions are required:
 
 1. **Isolated build environment** — move from a hosted runner to
    ephemeral, single-tenant builders (e.g.
-   `slsa-framework/slsa-github-generator`'s `generator_containerized_slsa3.yml`
+   `slsa-framework/slsa-github-generator`'s `generator_container_slsa3.yml`
    reusable workflow, or a self-hosted runner with a hardened image).
 2. **Provenance non-forgeability** — the generator workflow re-signs
    provenance with a build-platform-held signing key (sigstore / KMS)
@@ -103,7 +98,7 @@ additions are required:
    detectable by the wider community.
 
 To upgrade, switch the `attest-build-provenance` step to invoke the
-`slsa-framework/slsa-github-generator/.github/workflows/generator_containerized_slsa3.yml@v2`
+`slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2`
 reusable workflow with a build image pinned by digest. The reusable
 workflow handles ephemeral runners, hardened isolation, and
 non-forgeable provenance signing transparently.
