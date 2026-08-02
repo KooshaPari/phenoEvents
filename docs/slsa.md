@@ -35,7 +35,8 @@ The CI workflow lives at
 and is triggered:
 
 - Automatically on every `release: published` event.
-- Manually via `workflow_dispatch` for ad-hoc provenance generation.
+- Manually via `workflow_dispatch`, but only when the selected ref is a
+  versioned `vX.Y.Z` tag; branch attestations fail closed.
 
 ### Build Steps
 
