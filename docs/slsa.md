@@ -11,12 +11,11 @@ at the expected commit, by the expected build platform.
 **Current target: SLSA Build L2 (workflow repaired; hosted evidence pending)**
 
 The release pipeline is hosted on GitHub Actions, an isolated build
-platform that is owned and administered by GitHub. Provenance is
-generated automatically for every published release using
-[`slsa-framework/slsa-github-generator`][slsa-gh-gen] and the
-`attest-build-provenance` action. Provenance is signed by a GitHub-
-hosted OIDC token and stored in the [GitHub Artifact Attestations][ghaa]
-log alongside the artifact.
+platform that is owned and administered by GitHub. The repaired workflow
+uses the official `actions/attest-build-provenance` action for published
+releases. Provenance is signed through a GitHub-hosted OIDC flow and stored in
+the [GitHub Artifact Attestations][ghaa] log alongside the artifact; a real
+versioned-tag run is still required before this is marked achieved.
 
 | Requirement                                 | Status       |
 | ------------------------------------------- | ------------ |
