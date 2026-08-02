@@ -8,7 +8,7 @@ at the expected commit, by the expected build platform.
 
 ## Target Level
 
-**Current target: SLSA Build L2 (achieved today)**
+**Current target: SLSA Build L2 (workflow repaired; hosted evidence pending)**
 
 The release pipeline is hosted on GitHub Actions, an isolated build
 platform that is owned and administered by GitHub. Provenance is
@@ -20,10 +20,10 @@ log alongside the artifact.
 
 | Requirement                                 | Status       |
 | ------------------------------------------- | ------------ |
-| Provenance generated automatically          | ✅ L2        |
-| Provenance distributed alongside artifact   | ✅ L2        |
-| Build platform hosted and isolated          | ✅ L2        |
-| Provenance authenticity (OIDC-signed)       | ✅ L2        |
+| Provenance generated automatically          | ⏳ pending run |
+| Provenance distributed alongside artifact   | ⏳ pending run |
+| Build platform hosted and isolated          | ⏳ pending run |
+| Provenance authenticity (OIDC-signed)       | ⏳ pending run |
 | Build platform isolated from build request | ⏭ L3 target |
 | Hardened build platform                     | ⏭ L3 target |
 | Provenance non-forgeable (sigstore/cosign)  | ⏭ L3 target |
@@ -50,8 +50,9 @@ and is triggered:
    manifest into `release-artifacts/`.
 6. **Upload** — publish `release-artifacts` as a GitHub Actions artifact
    (90 day retention).
-7. **Attest** — generate SLSA Build L2 provenance with
-   `slsa-framework/slsa-github-generator/attest-build-provenance@v1`.
+7. **Attest** — generate GitHub Artifact Attestation provenance with the
+   pinned `actions/attest-build-provenance@v2` action over every staged file
+   matching `release-artifacts/*`.
 
 ## Verification
 
@@ -71,7 +72,7 @@ cosign verify-attestation \
   <artifact>
 ```
 
-The in-toto provenance attestation (`slsa-github-generator/actions/attest-build-provenance`)
+The in-toto provenance attestation (`actions/attest-build-provenance`)
 contains:
 
 - `builder.id` — `https://github.com/actions/runner`
@@ -85,7 +86,8 @@ contains:
 
 ## Path to SLSA Build L3
 
-The current pipeline satisfies L2. To graduate to L3, the following
+The repaired pipeline targets L2; a real release or manual dispatch run and
+artifact verification are still required before claiming L2. To graduate to L3, the following
 additions are required:
 
 1. **Isolated build environment** — move from a hosted runner to
