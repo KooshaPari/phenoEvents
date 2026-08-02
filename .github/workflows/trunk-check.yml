@@ -30,9 +30,12 @@ jobs:
 
       - name: Trunk Check
         uses: trunk-io/trunk-action@04ba50e7658c81db7356da96657e6e77f220bfa3  # v1.3.1; embeds actions/cache v5
+        with:
+          save-annotations: false
 
       - name: Trunk Upgrade (on schedule only)
         if: github.event_name == 'schedule'
         uses: trunk-io/trunk-action@04ba50e7658c81db7356da96657e6e77f220bfa3  # v1.3.1; embeds actions/cache v5
         with:
+          save-annotations: false
           trunk-args: --upgrade
