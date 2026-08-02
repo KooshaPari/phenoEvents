@@ -1,5 +1,8 @@
 use crate::core::EventEnvelope;
-use crate::observability::{metrics, trace_envelope};
+use crate::observability::{
+    metrics, queue_metrics, retry_metrics, snapshot, sqlite_busy_retries, trace_envelope,
+    worker_errors, MetricsSnapshot,
+};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use sqlx::{Pool, Row, Sqlite};
@@ -10,6 +13,8 @@ use uuid::Uuid;
 pub type HandlerResult = Result<(), HandlerError>;
 pub type HandlerFuture = Pin<Box<dyn Future<Output = HandlerResult> + Send>>;
 pub type Handler = Arc<dyn Fn(EventEnvelope, Option<Uuid>) -> HandlerFuture + Send + Sync>;
+
+const SQLITE_BUSY_RETRY_LIMIT: u32 = 8;
 
 pub mod in_memory;
 pub use in_memory::InMemoryBus;
@@ -42,6 +47,11 @@ pub struct Subscription {
     worker: JoinHandle<()>,
 }
 
+struct ClaimedEvent {
+    envelope: EventEnvelope,
+    claim_token: String,
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.worker.abort();
@@ -70,7 +80,11 @@ impl SqliteBus {
             poll_interval: StdDuration::from_millis(25),
             lease_timeout: StdDuration::from_secs(60),
         };
+        sqlx::query("PRAGMA busy_timeout = 5000")
+            .execute(&bus.db)
+            .await?;
         bus.migrate().await?;
+        bus.refresh_metrics().await?;
         Ok(bus)
     }
 
@@ -95,9 +109,42 @@ impl SqliteBus {
                 next_attempt_at TEXT NOT NULL,
                 last_error TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                claim_token TEXT
             );
             "#,
+        )
+        .execute(&self.db)
+        .await?;
+
+        let has_claim_token: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('outbox') WHERE name = 'claim_token' LIMIT 1",
+        )
+        .fetch_optional(&self.db)
+        .await?;
+        if has_claim_token.is_none() {
+            match sqlx::query("ALTER TABLE outbox ADD COLUMN claim_token TEXT")
+                .execute(&self.db)
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if error.to_string().contains("duplicate column name") => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_outbox_claim_due ON outbox (status, next_attempt_at, created_at)",
+        )
+        .execute(&self.db)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_outbox_claim_lease ON outbox (status, updated_at, created_at)",
+        )
+        .execute(&self.db)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_outbox_dlq_retention ON outbox (status, updated_at)",
         )
         .execute(&self.db)
         .await?;
@@ -116,7 +163,116 @@ impl SqliteBus {
         Ok(())
     }
 
-    async fn claim_next(&self) -> Result<Option<EventEnvelope>, sqlx::Error> {
+    /// Reconcile queue gauges from durable SQLite state and return the current
+    /// canonical snapshot. Deployments can call this before exporting metrics
+    /// when rows may have changed outside the worker transition path.
+    pub async fn refresh_metrics(&self) -> Result<MetricsSnapshot, sqlx::Error> {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox WHERE status IN ('pending', 'retrying', 'in_progress')",
+        )
+        .fetch_one(&self.db)
+        .await?;
+        let dlq: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox WHERE status = 'dlq'")
+            .fetch_one(&self.db)
+            .await?;
+        let oldest: Option<String> = sqlx::query_scalar(
+            "SELECT MIN(created_at) FROM outbox WHERE status IN ('pending', 'retrying', 'in_progress')",
+        )
+        .fetch_one(&self.db)
+        .await?;
+        let oldest_age_ms = oldest
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+            .map(|value| {
+                (Utc::now() - value.with_timezone(&Utc))
+                    .num_milliseconds()
+                    .max(0) as u64
+            })
+            .unwrap_or(0);
+        let (queue_depth, dlq_depth) = queue_metrics();
+        queue_depth.set(pending.max(0) as u64);
+        dlq_depth.set(dlq.max(0) as u64);
+        let (_, oldest_age) = retry_metrics();
+        oldest_age.set(oldest_age_ms);
+        let current = snapshot();
+        Ok(MetricsSnapshot {
+            queue_depth: pending.max(0) as u64,
+            dlq_depth: dlq.max(0) as u64,
+            oldest_event_age_ms: oldest_age_ms,
+            ..current
+        })
+    }
+
+    fn retry_delay(event_id: Uuid, attempt: i64) -> Duration {
+        let exponent = attempt.saturating_sub(1).min(12) as u32;
+        let base_ms = 10_i64.saturating_mul(1_i64 << exponent);
+        let jitter_window = (base_ms / 4).max(1);
+        let jitter = (event_id.as_u128() % jitter_window as u128) as i64;
+        Duration::milliseconds((base_ms + jitter).min(30_000))
+    }
+
+    fn is_sqlite_busy(error: &sqlx::Error) -> bool {
+        match error {
+            sqlx::Error::Database(database_error) => {
+                database_error.code().is_some_and(|code| code == "5")
+                    || database_error.message().contains("database is locked")
+            }
+            _ => false,
+        }
+    }
+
+    async fn insert_with_busy_retry(
+        &self,
+        event_id: &str,
+        envelope_json: &str,
+        now: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut delay = StdDuration::from_millis(2);
+        for attempt in 0..=SQLITE_BUSY_RETRY_LIMIT {
+            let result = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO outbox
+                    (event_id, envelope, status, attempts, next_attempt_at, created_at, updated_at)
+                VALUES (?, ?, 'pending', 0, ?, ?, ?)
+                "#,
+            )
+            .bind(event_id)
+            .bind(envelope_json)
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .execute(&self.db)
+            .await;
+
+            match result {
+                Ok(result) => return Ok(result.rows_affected() == 0),
+                Err(error) if attempt < SQLITE_BUSY_RETRY_LIMIT && Self::is_sqlite_busy(&error) => {
+                    sqlite_busy_retries().increment();
+                    time::sleep(delay).await;
+                    delay = (delay * 2).min(StdDuration::from_millis(250));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("busy retry loop always returns")
+    }
+
+    async fn claim_next(&self) -> Result<Option<ClaimedEvent>, sqlx::Error> {
+        let mut delay = StdDuration::from_millis(2);
+        for attempt in 0..=SQLITE_BUSY_RETRY_LIMIT {
+            match self.claim_next_once().await {
+                Ok(result) => return Ok(result),
+                Err(error) if attempt < SQLITE_BUSY_RETRY_LIMIT && Self::is_sqlite_busy(&error) => {
+                    sqlite_busy_retries().increment();
+                    time::sleep(delay).await;
+                    delay = (delay * 2).min(StdDuration::from_millis(250));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("busy retry loop always returns")
+    }
+
+    async fn claim_next_once(&self) -> Result<Option<ClaimedEvent>, sqlx::Error> {
         let now_dt = Utc::now();
         let now = now_dt.to_rfc3339();
         let lease_cutoff = (now_dt
@@ -145,10 +301,11 @@ impl SqliteBus {
 
         let event_id: String = row.get("event_id");
         let envelope_json: String = row.get("envelope");
+        let claim_token = Uuid::now_v7().to_string();
         let changed = sqlx::query(
             r#"
             UPDATE outbox
-            SET status = 'in_progress', updated_at = ?
+            SET status = 'in_progress', updated_at = ?, claim_token = ?
             WHERE event_id = ? AND (
                 (status IN ('pending', 'retrying') AND next_attempt_at <= ?)
                 OR (status = 'in_progress' AND updated_at < ?)
@@ -156,6 +313,7 @@ impl SqliteBus {
             "#,
         )
         .bind(&now)
+        .bind(&claim_token)
         .bind(event_id)
         .bind(&now)
         .bind(&lease_cutoff)
@@ -169,7 +327,12 @@ impl SqliteBus {
         }
 
         serde_json::from_str(&envelope_json)
-            .map(Some)
+            .map(|envelope| {
+                Some(ClaimedEvent {
+                    envelope,
+                    claim_token,
+                })
+            })
             .map_err(|err| sqlx::Error::Decode(Box::new(err)))
     }
 
@@ -195,32 +358,50 @@ impl SqliteBus {
         Ok(count > 0)
     }
 
-    async fn mark_handled(&self, event_id: Uuid) -> Result<(), sqlx::Error> {
+    async fn mark_handled(&self, event_id: Uuid, claim_token: &str) -> Result<bool, sqlx::Error> {
         let now = Utc::now().to_rfc3339();
         let mut tx = self.db.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE outbox SET status = 'acked', updated_at = ?, claim_token = NULL WHERE event_id = ? AND status = 'in_progress' AND claim_token = ?",
+        )
+            .bind(&now)
+            .bind(event_id.to_string())
+            .bind(claim_token)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if changed == 0 {
+            tx.commit().await?;
+            return Ok(false);
+        }
         sqlx::query("INSERT OR IGNORE INTO handled_events (event_id, handled_at) VALUES (?, ?)")
             .bind(event_id.to_string())
             .bind(&now)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE outbox SET status = 'acked', updated_at = ? WHERE event_id = ?")
-            .bind(now)
-            .bind(event_id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await
+        tx.commit().await?;
+        let (queue_depth, _) = queue_metrics();
+        queue_depth.decrement_by(1);
+        Ok(true)
     }
 
-    async fn mark_failed(&self, event_id: Uuid, error: String) -> Result<(), sqlx::Error> {
+    async fn mark_failed(
+        &self,
+        event_id: Uuid,
+        claim_token: &str,
+        error: String,
+    ) -> Result<bool, sqlx::Error> {
         let now = Utc::now();
+        let mut tx = self.db.begin().await?;
         let attempts: Option<i64> =
             sqlx::query_scalar("SELECT attempts FROM outbox WHERE event_id = ?")
                 .bind(event_id.to_string())
-                .fetch_optional(&self.db)
+                .fetch_optional(&mut *tx)
                 .await?;
         let Some(attempts) = attempts else {
             // Event was already removed from the outbox — nothing to update.
-            return Ok(());
+            tx.commit().await?;
+            return Ok(false);
         };
         let next_attempts = attempts + 1;
         let status = if next_attempts >= self.max_retries {
@@ -228,12 +409,12 @@ impl SqliteBus {
         } else {
             "retrying"
         };
-        let next = (now + Duration::milliseconds(10)).to_rfc3339();
-        sqlx::query(
+        let next = (now + Self::retry_delay(event_id, next_attempts)).to_rfc3339();
+        let changed = sqlx::query(
             r#"
             UPDATE outbox
-            SET status = ?, attempts = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
-            WHERE event_id = ?
+            SET status = ?, attempts = ?, next_attempt_at = ?, last_error = ?, updated_at = ?, claim_token = NULL
+            WHERE event_id = ? AND status = 'in_progress' AND claim_token = ?
             "#,
         )
         .bind(status)
@@ -242,20 +423,36 @@ impl SqliteBus {
         .bind(error)
         .bind(now.to_rfc3339())
         .bind(event_id.to_string())
-        .execute(&self.db)
-        .await?;
-        Ok(())
+        .bind(claim_token)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        if changed > 0 {
+            if status == "retrying" {
+                let (retried, _) = retry_metrics();
+                retried.increment();
+            } else {
+                let (queue_depth, dlq_depth) = queue_metrics();
+                queue_depth.decrement_by(1);
+                dlq_depth.increment();
+            }
+        }
+        Ok(changed > 0)
     }
 
     async fn process_once(&self, handler: &Handler) -> Result<bool, sqlx::Error> {
-        let Some(envelope) = self.claim_next().await? else {
+        let Some(claimed) = self.claim_next().await? else {
             return Ok(false);
         };
+        let envelope = claimed.envelope;
+        let claim_token = claimed.claim_token;
 
         if self.already_handled(envelope.id).await? {
-            self.mark_handled(envelope.id).await?;
-            let (_, events_processed, _) = metrics();
-            events_processed.increment();
+            if self.mark_handled(envelope.id, &claim_token).await? {
+                let (_, events_processed, _) = metrics();
+                events_processed.increment();
+            }
             return Ok(true);
         }
 
@@ -264,14 +461,19 @@ impl SqliteBus {
             let last_seen = self.last_seen().await?;
             match handler(envelope.clone(), last_seen).await {
                 Ok(()) => {
-                    self.mark_handled(envelope.id).await?;
-                    let (_, events_processed, _) = metrics();
-                    events_processed.increment();
+                    if self.mark_handled(envelope.id, &claim_token).await? {
+                        let (_, events_processed, _) = metrics();
+                        events_processed.increment();
+                    }
                 }
                 Err(err) => {
-                    self.mark_failed(envelope.id, err.to_string()).await?;
-                    let (_, _, events_failed) = metrics();
-                    events_failed.increment();
+                    if self
+                        .mark_failed(envelope.id, &claim_token, err.to_string())
+                        .await?
+                    {
+                        let (_, _, events_failed) = metrics();
+                        events_failed.increment();
+                    }
                 }
             }
             Ok::<(), sqlx::Error>(())
@@ -321,13 +523,18 @@ impl SqliteBus {
     pub async fn replay_dlq(&self, event_id: Uuid) -> Result<bool, sqlx::Error> {
         let now = Utc::now().to_rfc3339();
         let result = sqlx::query(
-            "UPDATE outbox SET status = 'pending', attempts = 0, next_attempt_at = ?, updated_at = ? WHERE event_id = ? AND status = 'dlq'",
+            "UPDATE outbox SET status = 'pending', attempts = 0, next_attempt_at = ?, last_error = NULL, updated_at = ?, claim_token = NULL WHERE event_id = ? AND status = 'dlq'",
         )
         .bind(&now)
         .bind(&now)
         .bind(event_id.to_string())
         .execute(&self.db)
         .await?;
+        if result.rows_affected() > 0 {
+            let (queue_depth, dlq_depth) = queue_metrics();
+            queue_depth.increment();
+            dlq_depth.decrement_by(1);
+        }
         Ok(result.rows_affected() > 0)
     }
 
@@ -339,6 +546,10 @@ impl SqliteBus {
             .bind(cutoff.to_rfc3339())
             .execute(&self.db)
             .await?;
+        if result.rows_affected() > 0 {
+            let (_, dlq_depth) = queue_metrics();
+            dlq_depth.decrement_by(result.rows_affected());
+        }
         Ok(result.rows_affected())
     }
 }
@@ -353,26 +564,19 @@ impl Bus for SqliteBus {
         let event_id = envelope.id;
         let envelope_json = serde_json::to_string(&envelope)
             .map_err(|err| PublishError::Sqlite(sqlx::Error::Encode(Box::new(err))))?;
-        let result = sqlx::query(
-            r#"
-            INSERT OR IGNORE INTO outbox
-                (event_id, envelope, status, attempts, next_attempt_at, created_at, updated_at)
-            VALUES (?, ?, 'pending', 0, ?, ?, ?)
-            "#,
-        )
-        .bind(event_id.to_string())
-        .bind(envelope_json)
-        .bind(&now)
-        .bind(&now)
-        .bind(&now)
-        .execute(&self.db)
-        .await?;
+        let duplicate = self
+            .insert_with_busy_retry(&event_id.to_string(), &envelope_json, &now)
+            .await?;
         let (events_published, _, _) = metrics();
         events_published.increment();
+        if !duplicate {
+            let (queue_depth, _) = queue_metrics();
+            queue_depth.increment();
+        }
 
         Ok(Ack {
             event_id,
-            duplicate: result.rows_affected() == 0,
+            duplicate,
         })
     }
 
@@ -383,7 +587,12 @@ impl Bus for SqliteBus {
             loop {
                 match bus.process_once(&handler).await {
                     Ok(true) => {}
-                    Ok(false) | Err(_) => time::sleep(bus.poll_interval).await,
+                    Ok(false) => time::sleep(bus.poll_interval).await,
+                    Err(error) => {
+                        worker_errors().increment();
+                        tracing::error!(error = %error, "event-bus worker poll failed");
+                        time::sleep(bus.poll_interval).await;
+                    }
                 }
             }
         });
@@ -398,11 +607,15 @@ mod tests {
     use crate::core::EventEnvelope;
     use chrono::{Duration as ChronoDuration, Utc};
     use serde_json::json;
-    use sqlx::SqlitePool;
+    use sqlx::{
+        sqlite::{SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+        Row, SqlitePool,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     };
+    use std::{collections::HashSet, str::FromStr, time::Instant};
     use tempfile::NamedTempFile;
     use tokio::time::{sleep, timeout, Duration};
     use uuid::Uuid;
@@ -412,6 +625,21 @@ mod tests {
             .await
             .expect("sqlite pool");
         SqliteBus::new(pool).await.expect("bus")
+    }
+
+    async fn file_pool(url: &str) -> SqlitePool {
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::from_str(url)
+                    .expect("sqlite options")
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .synchronous(SqliteSynchronous::Normal)
+                    .busy_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .expect("sqlite file pool")
     }
 
     fn event() -> EventEnvelope {
@@ -491,6 +719,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscriber_poll_errors_increment_worker_error_metric() {
+        let bus = bus().await;
+        let before = crate::observability::worker_errors().get();
+        let handler: Handler = Arc::new(move |_event, _last_seen| Box::pin(async { Ok(()) }));
+        let subscription = bus.subscribe(handler).await.expect("subscribe");
+
+        bus.db.close().await;
+        eventually_with_timeout(Duration::from_secs(2), || async {
+            crate::observability::worker_errors().get() > before
+        })
+        .await;
+        drop(subscription);
+    }
+
+    #[tokio::test]
     async fn nack_retries_until_success() {
         let bus = bus().await.with_max_retries(3);
         let calls = Arc::new(AtomicUsize::new(0));
@@ -536,6 +779,33 @@ mod tests {
         assert_eq!(bus.pending_count().await.expect("pending count"), 0);
         assert_eq!(bus.dlq_count().await.expect("dlq count"), 1);
     }
+
+    #[tokio::test]
+    async fn dlq_event_can_be_replayed_and_acked() {
+        let bus = bus().await.with_max_retries(1);
+        let failing: Handler = Arc::new(move |_event, _last_seen| {
+            Box::pin(async { Err(HandlerError("temporary outage".into())) })
+        });
+        let subscription = bus.subscribe(failing).await.expect("subscribe");
+        let envelope = event();
+        bus.publish(envelope.clone()).await.expect("publish");
+        eventually(|| async { bus.status(envelope.id).await.unwrap() == Some("dlq".into()) }).await;
+        drop(subscription);
+
+        assert!(bus.replay_dlq(envelope.id).await.expect("replay"));
+        assert!(!bus
+            .replay_dlq(envelope.id)
+            .await
+            .expect("idempotent replay"));
+        assert_eq!(bus.attempts(envelope.id).await.expect("attempts"), Some(0));
+        assert_eq!(bus.last_error(envelope.id).await.expect("last error"), None);
+
+        let succeeding: Handler = Arc::new(move |_event, _last_seen| Box::pin(async { Ok(()) }));
+        let _subscription = bus.subscribe(succeeding).await.expect("resubscribe");
+        eventually(|| async { bus.status(envelope.id).await.unwrap() == Some("acked".into()) })
+            .await;
+    }
+
     #[tokio::test]
     async fn handler_receives_last_seen_for_idempotency_context() {
         let bus = bus().await;
@@ -570,6 +840,20 @@ mod tests {
         let bus = bus().await;
         let result = bus.attempts(Uuid::now_v7()).await.expect("query");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn retry_delay_is_bounded_exponential_and_event_stable() {
+        let event_id = Uuid::from_u128(7);
+        assert!(SqliteBus::retry_delay(event_id, 2) > SqliteBus::retry_delay(event_id, 1));
+        assert_eq!(
+            SqliteBus::retry_delay(event_id, 100),
+            chrono::Duration::seconds(30)
+        );
+        assert_eq!(
+            SqliteBus::retry_delay(event_id, 3),
+            SqliteBus::retry_delay(event_id, 3)
+        );
     }
 
     #[tokio::test]
@@ -622,6 +906,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dlq_retention_prunes_only_expired_dlq_events() {
+        let bus = bus().await.with_max_retries(1);
+        let failing: Handler = Arc::new(move |_event, _last_seen| {
+            Box::pin(async { Err(HandlerError("retention test".into())) })
+        });
+        let _subscription = bus.subscribe(failing).await.expect("subscribe");
+        let envelope = event();
+        bus.publish(envelope.clone()).await.expect("publish");
+        eventually(|| async { bus.status(envelope.id).await.unwrap() == Some("dlq".into()) }).await;
+
+        let deleted = bus
+            .prune_dlq_before(Utc::now() + ChronoDuration::seconds(1))
+            .await
+            .expect("prune");
+        assert_eq!(deleted, 1);
+        assert_eq!(bus.status(envelope.id).await.expect("status"), None);
+        assert_eq!(bus.dlq_count().await.expect("dlq count"), 0);
+    }
+
+    #[tokio::test]
+    async fn refresh_metrics_reconciles_durable_queue_and_dlq_state() {
+        let bus = bus().await;
+        let envelope = event();
+        bus.publish(envelope.clone()).await.expect("publish");
+
+        let old_created_at = (Utc::now() - ChronoDuration::seconds(3)).to_rfc3339();
+        sqlx::query(
+            "UPDATE outbox SET status = 'pending', created_at = ?, updated_at = ? WHERE event_id = ?",
+        )
+        .bind(&old_created_at)
+        .bind(&old_created_at)
+        .bind(envelope.id.to_string())
+        .execute(&bus.db)
+        .await
+        .expect("age durable row");
+
+        let pending = bus.refresh_metrics().await.expect("refresh pending");
+        assert_eq!(pending.queue_depth, 1);
+        assert_eq!(pending.dlq_depth, 0);
+        assert!(pending.oldest_event_age_ms >= 2_000);
+
+        sqlx::query("UPDATE outbox SET status = 'dlq', updated_at = ? WHERE event_id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(envelope.id.to_string())
+            .execute(&bus.db)
+            .await
+            .expect("move durable row to dlq");
+
+        let dlq = bus.refresh_metrics().await.expect("refresh dlq");
+        assert_eq!(dlq.queue_depth, 0);
+        assert_eq!(dlq.dlq_depth, 1);
+        assert_eq!(dlq.oldest_event_age_ms, 0);
+    }
+
+    #[tokio::test]
     async fn stale_in_progress_event_is_reclaimed() {
         let bus = bus().await.with_lease_timeout(Duration::from_millis(1));
         let envelope = event();
@@ -648,11 +987,224 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn late_worker_completion_cannot_overwrite_newer_terminal_state() {
+        let bus = bus().await;
+        let envelope = event();
+        bus.publish(envelope.clone()).await.expect("publish");
+        let claimed = bus
+            .claim_next()
+            .await
+            .expect("claim")
+            .expect("claimed event");
+        sqlx::query("UPDATE outbox SET status = 'acked' WHERE event_id = ?")
+            .bind(envelope.id.to_string())
+            .execute(&bus.db)
+            .await
+            .expect("mark newer completion");
+
+        assert!(!bus
+            .mark_failed(envelope.id, &claimed.claim_token, "late failure".into())
+            .await
+            .expect("late failure"));
+        assert!(!bus
+            .mark_handled(envelope.id, &claimed.claim_token)
+            .await
+            .expect("late success"));
+
+        assert_eq!(
+            bus.status(envelope.id).await.expect("status"),
+            Some("acked".into())
+        );
+        assert_eq!(bus.attempts(envelope.id).await.expect("attempts"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn stale_worker_cannot_finish_newer_claim() {
+        let bus = bus().await.with_lease_timeout(Duration::from_millis(1));
+        let envelope = event();
+        bus.publish(envelope.clone()).await.expect("publish");
+
+        let first = bus
+            .claim_next()
+            .await
+            .expect("first claim")
+            .expect("first claimed event");
+        sqlx::query("UPDATE outbox SET updated_at = ? WHERE event_id = ?")
+            .bind((Utc::now() - ChronoDuration::seconds(5)).to_rfc3339())
+            .bind(envelope.id.to_string())
+            .execute(&bus.db)
+            .await
+            .expect("expire first claim");
+        let second = bus
+            .claim_next()
+            .await
+            .expect("second claim")
+            .expect("second claimed event");
+        assert_ne!(first.claim_token, second.claim_token);
+
+        assert!(!bus
+            .mark_failed(envelope.id, &first.claim_token, "late failure".into())
+            .await
+            .expect("stale failure"));
+        assert!(!bus
+            .mark_handled(envelope.id, &first.claim_token)
+            .await
+            .expect("stale success"));
+        assert_eq!(
+            bus.status(envelope.id).await.expect("status"),
+            Some("in_progress".into())
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM handled_events WHERE event_id = ?")
+                .bind(envelope.id.to_string())
+                .fetch_one(&bus.db)
+                .await
+                .expect("handled count"),
+            0
+        );
+
+        assert!(bus
+            .mark_handled(envelope.id, &second.claim_token)
+            .await
+            .expect("newer success"));
+        assert_eq!(
+            bus.status(envelope.id).await.expect("status"),
+            Some("acked".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn outbox_indexes_cover_claim_and_retention_paths() {
+        let bus = bus().await;
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_outbox_%' ORDER BY name",
+        )
+        .fetch_all(&bus.db)
+        .await
+        .expect("indexes");
+
+        assert_eq!(
+            indexes,
+            vec![
+                "idx_outbox_claim_due".to_owned(),
+                "idx_outbox_claim_lease".to_owned(),
+                "idx_outbox_dlq_retention".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_upgrades_legacy_outbox_schema() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        sqlx::query(
+            "CREATE TABLE outbox (event_id TEXT PRIMARY KEY, envelope TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy outbox");
+
+        let _bus = SqliteBus::new(pool.clone()).await.expect("migrate");
+        let has_claim_token: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('outbox') WHERE name = 'claim_token'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("claim token column");
+        assert_eq!(has_claim_token, 1);
+
+        let index_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_outbox_%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("indexes");
+        assert_eq!(index_count, 3);
+    }
+
+    #[tokio::test]
+    async fn outbox_query_plans_use_status_time_indexes() {
+        let bus = bus().await;
+        let now = Utc::now().to_rfc3339();
+        for index in 0..96 {
+            let status = match index % 3 {
+                0 => "pending",
+                1 => "in_progress",
+                _ => "dlq",
+            };
+            sqlx::query(
+                "INSERT INTO outbox (event_id, envelope, status, attempts, next_attempt_at, created_at, updated_at) VALUES (?, '{}', ?, 0, ?, ?, ?)",
+            )
+            .bind(Uuid::now_v7().to_string())
+            .bind(status)
+            .bind(&now)
+            .bind(&now)
+            .bind(&now)
+            .execute(&bus.db)
+            .await
+            .expect("seed outbox");
+        }
+
+        let due_details: Vec<String> = sqlx::query(
+            "EXPLAIN QUERY PLAN SELECT event_id FROM outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY created_at LIMIT 1",
+        )
+        .bind(&now)
+        .fetch_all(&bus.db)
+        .await
+        .expect("due plan")
+        .into_iter()
+        .map(|row| row.get("detail"))
+        .collect();
+        assert!(
+            due_details
+                .iter()
+                .any(|detail| detail.contains("idx_outbox_claim_due")),
+            "due plan did not use claim index: {due_details:?}"
+        );
+
+        let lease_details: Vec<String> = sqlx::query(
+            "EXPLAIN QUERY PLAN SELECT event_id FROM outbox WHERE status = 'in_progress' AND updated_at < ? ORDER BY created_at LIMIT 1",
+        )
+        .bind(&now)
+        .fetch_all(&bus.db)
+        .await
+        .expect("lease plan")
+        .into_iter()
+        .map(|row| row.get("detail"))
+        .collect();
+        assert!(
+            lease_details.iter().any(|detail| {
+                detail.contains("idx_outbox_claim_lease")
+                    || detail.contains("idx_outbox_dlq_retention")
+            }),
+            "lease plan did not use status/time index: {lease_details:?}"
+        );
+
+        let retention_details: Vec<String> = sqlx::query(
+            "EXPLAIN QUERY PLAN DELETE FROM outbox WHERE status = 'dlq' AND updated_at < ?",
+        )
+        .bind(&now)
+        .fetch_all(&bus.db)
+        .await
+        .expect("retention plan")
+        .into_iter()
+        .map(|row| row.get("detail"))
+        .collect();
+        assert!(
+            retention_details
+                .iter()
+                .any(|detail| detail.contains("idx_outbox_dlq_retention")),
+            "retention plan did not use DLQ index: {retention_details:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn file_backed_workers_claim_each_event_once() {
         let file = NamedTempFile::new().expect("sqlite file");
         let url = format!("sqlite://{}", file.path().display());
-        let pool_a = SqlitePool::connect(&url).await.expect("pool a");
-        let pool_b = SqlitePool::connect(&url).await.expect("pool b");
+        let pool_a = file_pool(&url).await;
+        let pool_b = file_pool(&url).await;
         let bus_a = SqliteBus::new(pool_a).await.expect("bus a");
         let bus_b = SqliteBus::new(pool_b).await.expect("bus b");
         let seen = Arc::new(AtomicUsize::new(0));
@@ -680,5 +1232,59 @@ mod tests {
         })
         .await;
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn file_backed_workers_drain_1000_events_without_duplicates() {
+        let file = NamedTempFile::new().expect("sqlite file");
+        let url = format!("sqlite://{}", file.path().display());
+        let pool_a = file_pool(&url).await;
+        let pool_b = file_pool(&url).await;
+        let bus_a = SqliteBus::new(pool_a).await.expect("bus a");
+        let bus_b = SqliteBus::new(pool_b).await.expect("bus b");
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let duplicates = Arc::new(AtomicUsize::new(0));
+        let make_handler = |seen: Arc<Mutex<HashSet<Uuid>>>, duplicates: Arc<AtomicUsize>| {
+            Arc::new(move |event: EventEnvelope, _last_seen: Option<Uuid>| {
+                let seen = seen.clone();
+                let duplicates = duplicates.clone();
+                Box::pin(async move {
+                    if !seen.lock().expect("seen").insert(event.id) {
+                        duplicates.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(())
+                }) as super::HandlerFuture
+            }) as Handler
+        };
+        let started = Instant::now();
+        timeout(Duration::from_secs(30), async {
+            for _ in 0..1_000 {
+                bus_a.publish(event()).await.expect("publish");
+            }
+        })
+        .await
+        .expect("publishing 1,000 events");
+
+        let _sub_a = bus_a
+            .subscribe(make_handler(seen.clone(), duplicates.clone()))
+            .await
+            .expect("sub a");
+        let _sub_b = bus_b
+            .subscribe(make_handler(seen.clone(), duplicates.clone()))
+            .await
+            .expect("sub b");
+
+        // File-backed SQLite can be substantially slower on a busy Windows
+        // host; keep the correctness bound finite while avoiding a false
+        // timeout before the duplicate/pending invariants are checked.
+        eventually_with_timeout(Duration::from_secs(180), || async {
+            let count = seen.lock().expect("seen").len();
+            count == 1_000 && bus_a.pending_count().await.unwrap() == 0
+        })
+        .await;
+
+        assert_eq!(duplicates.load(Ordering::SeqCst), 0);
+        assert_eq!(seen.lock().expect("seen").len(), 1_000);
+        assert!(started.elapsed() < Duration::from_secs(180));
     }
 }

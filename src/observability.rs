@@ -29,6 +29,8 @@ static EVENTS_RETRIED: OnceLock<Arc<AtomicU64>> = OnceLock::new();
 static QUEUE_DEPTH: OnceLock<Arc<AtomicU64>> = OnceLock::new();
 static DLQ_DEPTH: OnceLock<Arc<AtomicU64>> = OnceLock::new();
 static OLDEST_EVENT_AGE_MS: OnceLock<Arc<AtomicU64>> = OnceLock::new();
+static WORKER_ERRORS: OnceLock<Arc<AtomicU64>> = OnceLock::new();
+static SQLITE_BUSY_RETRIES: OnceLock<Arc<AtomicU64>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct Counter {
@@ -71,6 +73,19 @@ impl Gauge {
     pub fn set(&self, value: u64) {
         self.value.store(value, Ordering::Relaxed);
     }
+
+    pub fn increment(&self) {
+        self.value.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn decrement_by(&self, amount: u64) {
+        let _ = self
+            .value
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_sub(amount))
+            });
+    }
+
     pub fn get(&self) -> u64 {
         self.value.load(Ordering::Relaxed)
     }
@@ -109,6 +124,17 @@ pub fn retry_metrics() -> (Counter, Gauge) {
         Counter::new(&EVENTS_RETRIED),
         Gauge::new(&OLDEST_EVENT_AGE_MS),
     )
+}
+
+/// Count worker-side storage, lock, and decode errors that caused a poll to
+/// back off. This is separate from handler delivery failures.
+pub fn worker_errors() -> Counter {
+    Counter::new(&WORKER_ERRORS)
+}
+
+/// Count bounded retries taken after SQLite reports transient contention.
+pub fn sqlite_busy_retries() -> Counter {
+    Counter::new(&SQLITE_BUSY_RETRIES)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +177,10 @@ pub fn snapshot() -> MetricsSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{init_tracing, metrics, trace_envelope, MetricsSnapshot};
+    use super::{
+        init_tracing, metrics, queue_metrics, retry_metrics, snapshot, sqlite_busy_retries,
+        trace_envelope, worker_errors, MetricsSnapshot,
+    };
     use crate::core::EventEnvelope;
     use serde_json::json;
 
@@ -180,6 +209,45 @@ mod tests {
         assert_eq!(published.get(), 1);
         assert_eq!(processed.get(), 2);
         assert_eq!(failed.get(), 1);
+    }
+
+    #[test]
+    fn queue_gauges_track_latest_snapshot() {
+        let (queue_depth, dlq_depth) = queue_metrics();
+        queue_depth.set(12);
+        dlq_depth.set(3);
+        assert_eq!(queue_depth.get(), 12);
+        assert_eq!(dlq_depth.get(), 3);
+    }
+
+    #[test]
+    fn snapshot_contains_exportable_signal_values() {
+        let (retried, oldest_age) = retry_metrics();
+        retried.reset();
+        retried.increment();
+        oldest_age.set(42);
+        let current = snapshot();
+        assert_eq!(current.retried, 1);
+        assert_eq!(current.oldest_event_age_ms, 42);
+    }
+
+    #[test]
+    fn worker_errors_are_counted_separately() {
+        let errors = worker_errors();
+        errors.reset();
+        errors.increment();
+        errors.increment();
+        assert_eq!(errors.get(), 2);
+    }
+
+    #[test]
+    fn sqlite_busy_retries_are_counted_separately() {
+        let retries = sqlite_busy_retries();
+        let worker_error_count = worker_errors().get();
+        retries.reset();
+        retries.increment();
+        assert_eq!(retries.get(), 1);
+        assert_eq!(worker_errors().get(), worker_error_count);
     }
 
     #[test]
