@@ -98,20 +98,6 @@ pull_request_rules:
         add:
           - typescript
 
-  # Close stale PRs after 30 days
-  - name: Close stale PRs
-    conditions:
-      - -closed
-      - -draft
-      - age >= 30d
-      - "#review-requested = 0"
-    actions:
-      comment:
-        message: >
-          This PR has been automatically closed after 30 days of inactivity.
-          Feel free to reopen if still relevant.
-      close: {}
-
   # Warn on large PRs
   - name: Warn on large PRs
     conditions:
