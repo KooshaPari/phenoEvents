@@ -22,17 +22,26 @@ jobs:
       CARGO_WORKDIR: .
     steps:
       - name: Checkout source
-        uses: actions/checkout@v7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
+      - name: Require versioned release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release attestation requires a versioned vX.Y.Z tag; got ${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: stable
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: |
             . -> target
@@ -73,14 +82,16 @@ jobs:
           ls -la release-artifacts/
 
       - name: Upload artifacts for provenance
-        uses: actions/upload-artifact@v7
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-artifacts
+          name: release-artifacts.zip
           path: ${{ env.CARGO_WORKDIR }}/release-artifacts/
           if-no-files-found: warn
           retention-days: 90
 
       - name: Attest build provenance (SLSA Build L2)
-        uses: slsa-framework/slsa-github-generator/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          artifact-name: release-artifacts
+          subject-name: release-artifacts.zip
+          subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}
