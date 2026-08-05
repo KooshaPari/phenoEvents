@@ -278,7 +278,10 @@ impl SqliteBus {
         let lease_cutoff = (now_dt
             - Duration::from_std(self.lease_timeout).unwrap_or_else(|_| Duration::seconds(60)))
         .to_rfc3339();
-        let mut tx = self.db.begin().await?;
+        // Reserve the SQLite write slot before the select/update pair. A
+        // deferred transaction can hold a read snapshot that fails to upgrade
+        // under two-worker contention, surfacing avoidable poll errors.
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             r#"
             SELECT event_id, envelope
